@@ -1,61 +1,26 @@
-global httprecrdTable :table[addr] of set[time,count,string] ;
+@load base/frameworks/sumstats
 
-global mintimeTable :table[addr] of time = {};
-global maxtimeTable :table[addr] of time = {};
-global replycounterIn10MinsTable :table[addr] of count = {};
-global _400counterIn10MinsTable :table[addr] of count = {};
-global urlsetIn10MinsTable: table[addr] of set[string] = {};
-
-global problemIP :set[string] = {};
-
-event http_reply(c: connection, version: string, code: count, reason: string)
+event http_reply (c: connection, version: string, code: count, reason: string)
 {
-	local t1 = network_time();
-	
-	if(c$id$orig_h in httprecrdTable)
+	if(code==404)
 	{
-		add httprecrdTable[c$id$orig_h][t1,code,c$http$uri];
-	
-		if (t1 > maxtimeTable[c$id$orig_h]){maxtimeTable[c$id$orig_h]=t1;}
-		++replycounterIn10MinsTable[c$id$orig_h];
-		if (code == 404){++_400counterIn10MinsTable[c$id$orig_h];}
-		if (c$http$uri !in urlsetIn10MinsTable[c$id$orig_h]){ add urlsetIn10MinsTable[c$id$orig_h][c$http$uri];}
+		SumStats::observe("404", SumStats::Key($host=c$id$orig_h), SumStats::Observation($num=1));
+		SumStats::observe("uniURL404", SumStats::Key($host=c$id$orig_h), SumStats::Observation($str=c$http$uri));
 	}
-	else
-	{
-		local a :set[time,count,string];
-		local b :set[string];
-		local d :set[string];
-		
-		httprecrdTable[c$id$orig_h] = a;
-		add httprecrdTable[c$id$orig_h][t1,code,c$http$uri];
-		
-		mintimeTable[c$id$orig_h] = t1;
-		maxtimeTable[c$id$orig_h] = t1;
-		replycounterIn10MinsTable[c$id$orig_h] = 1;
-		if ( code == 404 ){_400counterIn10MinsTable[c$id$orig_h]=1;}
-		else{_400counterIn10MinsTable[c$id$orig_h]=0;}
-		
-		urlsetIn10MinsTable[c$id$orig_h] = b;
-		add urlsetIn10MinsTable[c$id$orig_h][c$http$uri];
-	}
-	
-	if (maxtimeTable[c$id$orig_h] - mintimeTable[c$id$orig_h] > 10mins)
-	{
-		if(_400counterIn10MinsTable[c$id$orig_h]>2)
-			if(_400counterIn10MinsTable[c$id$orig_h]/replycounterIn10MinsTable[c$id$orig_h]>0.2)
-				if(|urlsetIn10MinsTable[c$id$orig_h]|/_400counterIn10MinsTable[c$id$orig_h]>0.5)
-				{
-					print fmt("%s is a scanner with %d scan attemps on %d urls",c$id$orig_h,_400counterIn10MinsTable[c$id$orig_h],|urlsetIn10MinsTable[c$id$orig_h]|);
-					mintimeTable[c$id$orig_h]=maxtimeTable[c$id$orig_h];
-					replycounterIn10MinsTable[c$id$orig_h]=0;
-					_400counterIn10MinsTable[c$id$orig_h]=0;
-					urlsetIn10MinsTable[c$id$orig_h]=d;
-				}
-	}
+	SumStats::observe("response", SumStats::Key($host=c$id$orig_h), SumStats::Observation($num=1));
 }
 
-
-event zeek_done()
+event zeek_init()
 {
+	local r1=SumStats::Reducer($stream="404", $apply=set(SumStats::SUM)); # if the count of 404 response > 2
+	local r2=SumStats::Reducer($stream="uniURL404", $apply=set(SumStats::UNIQUE)); # the unique count of url response 404
+	local r3=SumStats::Reducer($stream="response", $apply=set(SumStats::SUM));  # the count of all response
+
+	SumStats::create([$name="ymc_scanner", $epoch=10min, $reducers=set(r1,r2,r3), 
+					  $epoch_result(ts:time, key: SumStats::Key, result: SumStats::Result)={local s1=result["404"]; local s2=result["uniURL404"]; local s3=result["response"];
+																							if (s1$sum>2 && 1.0*s1$sum/s3$sum>0.2 && 1.0*s2$unique/s1$sum>0.5) # three cases
+																							{
+																								print fmt("%s is a scanner with %d scan attemps on %d urls", key$host, s1$sum, s2$unique);
+																							}
+																							}]);
 }
